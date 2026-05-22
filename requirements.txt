@@ -1,14 +1,13 @@
 fastapi
 uvicorn
-pydantic
 python-dotenv
-pymongo
-openai==1.25.2
+openai==1.30.5
 httpx==0.27.0
-chromadb==0.5.3
+pymongo
 sentence-transformers
+chromadb
+pypdf
 PyMuPDF
-python-jose
 passlib
-bcrypt
+python-jose
 torch --index-url https://download.pytorch.org/whl/cpu
