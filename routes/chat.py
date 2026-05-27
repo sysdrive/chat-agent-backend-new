@@ -2,13 +2,11 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from openai import OpenAI
-from dotenv import load_dotenv
-
 from database import chat_collection
 
 from sentence_transformers import SentenceTransformer
-
 import chromadb
+
 import os
 
 # =========================
@@ -18,18 +16,24 @@ import os
 os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-load_dotenv()
-
 router = APIRouter()
 
 # =========================
-# LLM CLIENT
+# GROQ CLIENT (SAFE INIT)
 # =========================
 
-client = OpenAI(
-    api_key=os.getenv("GROQ_API_KEY"),
-    base_url="https://api.groq.com/openai/v1"
-)
+def get_client():
+    api_key = os.getenv("GROQ_API_KEY")
+
+    if not api_key:
+        raise ValueError("GROQ_API_KEY is missing in Railway environment variables")
+
+    return OpenAI(
+        api_key=api_key,
+        base_url="https://api.groq.com/openai/v1"
+    )
+
+client = get_client()
 
 # =========================
 # EMBEDDING MODEL
@@ -70,12 +74,15 @@ def chat(data: Chat):
     print("QUESTION:", data.message)
 
     # =========================
-    # CREATE QUERY EMBEDDING
+    # DEBUG ENV (OPTIONAL)
+    # =========================
+    print("GROQ KEY LOADED:", bool(os.getenv("GROQ_API_KEY")))
+
+    # =========================
+    # QUERY EMBEDDING
     # =========================
 
-    query_embedding = embedding_model.encode(
-        data.message
-    ).tolist()
+    query_embedding = embedding_model.encode(data.message).tolist()
 
     # =========================
     # VECTOR SEARCH
@@ -86,50 +93,35 @@ def chat(data: Chat):
         n_results=8
     )
 
-    docs = results["documents"][0]
+    docs = results["documents"][0] if results.get("documents") else []
 
-    print("\nRETRIEVED DOCS:\n")
+    print("\nRETRIEVED DOCS:")
 
     for i, d in enumerate(docs):
-
-        print(f"\nDOCUMENT {i+1}:\n")
-        print(d[:500])
-
-    # =========================
-    # CONTEXT BUILD
-    # =========================
+        print(f"\nDOC {i+1}:\n{d[:300]}")
 
     context = "\n\n".join(docs)
 
     # =========================
-    # LOAD CHAT MEMORY
+    # CHAT HISTORY
     # =========================
 
     previous_chats = list(
-
         chat_collection.find(
-
-            {
-                "email": data.email
-            },
-
+            {"email": data.email},
             {"_id": 0}
-
         ).sort("_id", 1)
-
     )
 
     conversation_history = ""
 
-    for chat_item in previous_chats:
-
+    for c in previous_chats:
         conversation_history += f"""
-
 USER:
-{chat_item["user"]}
+{c["user"]}
 
 ASSISTANT:
-{chat_item["assistant"]}
+{c["assistant"]}
 
 """
 
@@ -138,120 +130,69 @@ ASSISTANT:
     # =========================
 
     prompt = f"""
-You are an advanced conversational AI assistant.
+You are an advanced multilingual AI assistant.
 
-IMPORTANT RULES:
-
-1. Continue conversation naturally using previous chat history.
-
-2. Remember previous user questions and assistant answers.
-
-3. Maintain conversational context.
-
-4. If user asks follow-up questions like:
-- "tell more"
-- "what about treatment?"
-- "explain again"
-- "उसका इलाज क्या है?"
-then understand previous context automatically.
-
-5. If user asks in Hindi,
-reply in Hindi.
-
-6. If user asks in English,
-reply in English.
-
-7. If user uses Hinglish,
-reply naturally in Hinglish.
-
-8. Use simple language.
-
-9. Answer ONLY using:
-- previous conversation
-- retrieved document context
-
-10. Never invent fake information.
-
-11. If answer not found in context,
-say:
+RULES:
+- Use previous conversation history
+- Use only provided context
+- Do NOT hallucinate
+- Reply in user's language (Hindi/English/Hinglish)
+- If info not found, say:
 "यह जानकारी उपलब्ध डॉक्यूमेंट्स में नहीं मिली।"
 
 =========================
-PREVIOUS CONVERSATION
+CHAT HISTORY
 =========================
-
 {conversation_history}
 
 =========================
 DOCUMENT CONTEXT
 =========================
-
 {context}
 
 =========================
-CURRENT USER QUESTION
+USER QUESTION
 =========================
-
 {data.message}
 """
 
     # =========================
-    # LLM RESPONSE
+    # LLM CALL
     # =========================
 
     response = client.chat.completions.create(
-
         model="llama-3.3-70b-versatile",
-
         messages=[
-
             {
                 "role": "system",
-                "content":
-                "You are a multilingual AI medical assistant."
+                "content": "You are a helpful multilingual AI assistant."
             },
-
             {
                 "role": "user",
                 "content": prompt
             }
-
         ],
-
         temperature=0.2,
-
         max_tokens=700
     )
 
     answer = response.choices[0].message.content
 
-    print("\nANSWER:\n")
-    print(answer)
+    print("\nANSWER:\n", answer)
 
     # =========================
-    # SAVE CHAT MEMORY
+    # SAVE MEMORY
     # =========================
 
     chat_collection.insert_one({
-
         "email": data.email,
-
         "user": data.message,
-
         "assistant": answer
-
     })
 
-    # =========================
-    # RESPONSE
-    # =========================
-
     return {
-
         "answer": answer,
-
-        "sources": len(docs)
-
+        "sources_used": len(docs)
     }
 
 # =========================
@@ -259,25 +200,15 @@ CURRENT USER QUESTION
 # =========================
 
 @router.get("/history/{email}")
-
 def get_history(email: str):
 
     chats = list(
-
         chat_collection.find(
-
-            {
-                "email": email
-            },
-
+            {"email": email},
             {"_id": 0}
-
         ).sort("_id", 1)
-
     )
 
     return {
-
         "history": chats
-
     }
